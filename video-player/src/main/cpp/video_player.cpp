@@ -51,6 +51,21 @@ struct FFmpegContext {
     int64_t frameInterval = 0;  // 帧间隔（微秒）
     int64_t nextFrameTime = 0;  // 下一帧的目标时间
     int targetQueueSize;  // 目标队列大小
+    int64_t startTime = 0;        // 开始播放时间
+    int64_t totalDuration = 0;    // 视频总时长（微秒）
+    int64_t currentTime = 0;      // 当前播放时间（微秒）
+    double timeBase = 0.0;        // 时间基准
+    
+    // 获取格式化的��间字符串
+    std::string getFormattedTime(int64_t timeInMicros) {
+        int64_t totalSeconds = timeInMicros / AV_TIME_BASE;
+        int hours = totalSeconds / 3600;
+        int minutes = (totalSeconds % 3600) / 60;
+        int seconds = totalSeconds % 60;
+        char buffer[32];
+        snprintf(buffer, sizeof(buffer), "%02d:%02d:%02d", hours, minutes, seconds);
+        return std::string(buffer);
+    }
 
     ~FFmpegContext() {
         // 析构函数：确保资源被正确释放
@@ -154,6 +169,8 @@ Java_com_giffard_video_1player_decoder_FFmpegDecoder_initDecoder(JNIEnv *env, jo
     ffmpegContext->frameRate = av_q2d(videoStream->avg_frame_rate);
     ffmpegContext->calculateTargetQueueSize();
 
+    ffmpegContext->timeBase = av_q2d(videoStream->time_base);
+
     jclass decoderClass = env->GetObjectClass(thiz);
     g_onFrameDecodedMethod = env->GetMethodID(decoderClass, "onFrameDecoded",
                                               "(Ljava/nio/ByteBuffer;)V");
@@ -161,6 +178,13 @@ Java_com_giffard_video_1player_decoder_FFmpegDecoder_initDecoder(JNIEnv *env, jo
 
     env->ReleaseStringUTFChars(videoPath, path);
     LOGI("Decoder initialized successfully");
+
+    // 获取视频总时长
+    if (ffmpegContext->formatContext->duration != AV_NOPTS_VALUE) {
+        ffmpegContext->totalDuration = ffmpegContext->formatContext->duration;
+        LOGI("视频总时长: %s", 
+             ffmpegContext->getFormattedTime(ffmpegContext->totalDuration).c_str());
+    }
 
     // 返回视频信息数组 [width, height, frameRate]
     jintArray info = env->NewIntArray(3);
@@ -175,57 +199,58 @@ Java_com_giffard_video_1player_decoder_FFmpegDecoder_initDecoder(JNIEnv *env, jo
 
 // 解码线程函数：负责从视频文件中读取数据并解码
 void decodeThreadFunc() {
-    AVPacket *packet = av_packet_alloc();
+    AVPacket packet;
+    av_init_packet(&packet);
     AVFrame *frame = av_frame_alloc();
-    if (!frame || !packet) {
-        LOGE("无法分配 AVFrame 或 AVPacket");
+    if (!frame) {
+        LOGE("无法分配 AVFrame");
         return;
     }
 
-    // 计算帧间隔微秒
-    ffmpegContext->frameInterval = static_cast<int64_t>(AV_TIME_BASE / ffmpegContext->frameRate);
-    ffmpegContext->nextFrameTime = av_gettime_relative();
-
+    int64_t lastPts = 0;
     while (g_isDecoding) {
-        if (av_read_frame(ffmpegContext->formatContext, packet) < 0) {
+        if (av_read_frame(ffmpegContext->formatContext, &packet) < 0) {
             break;
         }
 
-        if (packet->stream_index == 0) {  // 视频流
-            if (avcodec_send_packet(ffmpegContext->codecContext, packet) == 0) {
+        if (packet.stream_index == 0) {
+            if (avcodec_send_packet(ffmpegContext->codecContext, &packet) == 0) {
                 while (avcodec_receive_frame(ffmpegContext->codecContext, frame) == 0) {
+                    // 使用 PTS 计算实际播放时间
+                    int64_t pts = frame->pts;
+                    if (pts != AV_NOPTS_VALUE) {
+                        int64_t timeInMicros = static_cast<int64_t>(pts * 
+                            ffmpegContext->timeBase * AV_TIME_BASE);
+                        
+                        // 计算需要等待的时间
+                        if (lastPts != 0) {
+                            int64_t waitTime = timeInMicros - lastPts;
+                            if (waitTime > 0) {
+                                av_usleep(static_cast<unsigned int>(waitTime));
+                            }
+                        }
+                        lastPts = timeInMicros;
+                    }
+
                     std::unique_lock<std::mutex> lock(frameQueueMutex);
-                    
-                    // 使用动态队列大小
                     frameQueueCV.wait(lock, [&]() { 
                         return frameQueue.size() < ffmpegContext->targetQueueSize; 
                     });
 
-                    // 如果队列已经很大，可能需要跳过一些帧
-                    if (frameQueue.size() > ffmpegContext->targetQueueSize * 0.8) {
-                        int64_t currentTime = av_gettime_relative();
-                        if (currentTime - ffmpegContext->nextFrameTime > 
-                            ffmpegContext->frameInterval * 2) {
-                            LOGI("队列接近满载，跳过帧以追赶进度");
-                            continue;
-                        }
-                    }
-
                     AVFrame *clonedFrame = av_frame_clone(frame);
                     if (clonedFrame) {
+                        clonedFrame->pts = pts;  // 保存 PTS
                         frameQueue.push(clonedFrame);
                         frameQueueCV.notify_one();
-                        LOGI("解码线程：帧已入队，当前队列大小：%zu/%d", 
-                             frameQueue.size(), ffmpegContext->targetQueueSize);
                     }
                 }
             }
         }
-        av_packet_unref(packet);
+        av_packet_unref(&packet);
     }
 
-    av_packet_free(&packet);
     av_frame_free(&frame);
+    av_packet_unref(&packet);
     LOGI("解码线程结束");
 }
 
@@ -245,15 +270,29 @@ void renderThreadFunc(JavaVM *jvm) {
         {
             std::unique_lock<std::mutex> lock(frameQueueMutex);
             
-            // 等待新帧或超时
             if (frameQueueCV.wait_for(lock, std::chrono::microseconds(renderInterval),
                                     []() { return !frameQueue.empty(); })) {
                 
                 frame = frameQueue.front();
                 frameQueue.pop();
+                
+                // 使用 PTS 更新当前播放时间
+                if (frame->pts != AV_NOPTS_VALUE) {
+                    ffmpegContext->currentTime = static_cast<int64_t>(frame->pts * 
+                        ffmpegContext->timeBase * AV_TIME_BASE);
+                    
+                    // 每秒输出一次播放进度
+                    static int64_t lastLogTime = 0;
+                    if (ffmpegContext->currentTime - lastLogTime >= AV_TIME_BASE) {
+                        LOGI("播放进度: %s / %s", 
+                             ffmpegContext->getFormattedTime(ffmpegContext->currentTime).c_str(),
+                             ffmpegContext->getFormattedTime(ffmpegContext->totalDuration).c_str());
+                        lastLogTime = ffmpegContext->currentTime;
+                    }
+                }
             }
-        }  // 解锁互斥锁
-
+        }
+        
         if (frame) {
             // 计算渲染时间
             int64_t currentTime = av_gettime_relative();
@@ -309,6 +348,7 @@ Java_com_giffard_video_1player_decoder_FFmpegDecoder_startNativeDecoding(JNIEnv 
     }
 
     g_isDecoding = true;
+    ffmpegContext->startTime = av_gettime_relative();
 
     JavaVM *jvm = nullptr;
     if (env->GetJavaVM(&jvm) != 0) {
@@ -325,6 +365,10 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_giffard_video_1player_decoder_FFmpegDecoder_stopNativeDecoding(JNIEnv *env,
                                                                         jobject thiz) {
     LOGI("stopNativeDecoding");
+
+    if (!g_isDecoding) {
+        return;
+    }
 
     g_isDecoding = false;
     frameQueueCV.notify_all();
