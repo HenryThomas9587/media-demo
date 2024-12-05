@@ -10,9 +10,11 @@ class FFmpegDecoder : VideoDecoder {
     private var frameBuffer: ByteBuffer? = null // Buffer to store decoded frames
     private val isInitialized = AtomicBoolean(false) // Tracks if the decoder is initialized
     private val isDecoding = AtomicBoolean(false)    // Tracks if decoding is in progress
+    private var frameWidth: Int = 0
+    private var frameHeight: Int = 0
 
     // JNI Method Declarations
-    private external fun initDecoder(videoPath: String)
+    private external fun initDecoder(videoPath: String): IntArray
     private external fun startNativeDecoding()
     private external fun stopNativeDecoding()
     private external fun releaseDecoder()
@@ -24,9 +26,20 @@ class FFmpegDecoder : VideoDecoder {
         }
 
         try {
-            initDecoder(videoPath)
+            val videoInfo = initDecoder(videoPath)
+            if (videoInfo.size < 3) {
+                throw IllegalStateException("Failed to initialize decoder")
+            }
+            frameWidth = videoInfo[0]
+            frameHeight = videoInfo[1]
+            val frameRate = videoInfo[2].toFloat()
+            
             isInitialized.set(true)
-            Log.i(TAG, "Decoder initialized successfully for path: $videoPath")
+            Log.i(
+                TAG,
+                "Decoder initialized successfully for path: $videoPath, dimensions: ${frameWidth}x${frameHeight}, fps: $frameRate"
+            )
+            decoderListener?.onVideoMetadataReady(frameWidth, frameHeight, frameRate)
         } catch (e: Exception) {
             Log.e(TAG, "Error initializing decoder: ${e.message}")
             throw IllegalStateException("Failed to initialize decoder", e)
@@ -96,7 +109,7 @@ class FFmpegDecoder : VideoDecoder {
         }
 
         frame?.let {
-            synchronized(this) { // Ensure thread-safety
+            synchronized(this) {
                 try {
                     val capacity = frameBuffer?.capacity() ?: 0
                     if (frameBuffer == null || capacity < it.remaining()) {
@@ -105,9 +118,8 @@ class FFmpegDecoder : VideoDecoder {
                     frameBuffer?.apply {
                         clear()
                         put(it)
-                        flip() // Prepare the buffer for reading
-                        Log.i(TAG, " processing decoded frameBuffer capacity :"+frameBuffer?.capacity())
-                        decoderListener?.onFrameDecoded(this)
+                        flip()
+                        decoderListener?.onFrameDecoded(this, frameWidth, frameHeight)
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "Error processing decoded frame: ${e.message}")

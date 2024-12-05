@@ -2,6 +2,7 @@ package com.giffard.opengl
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.opengl.GLSurfaceView
 import android.os.Bundle
 import android.util.Log
 import android.widget.Toast
@@ -94,9 +95,17 @@ class MainActivity : AppCompatActivity() {
     private fun setupPlayer() {
         if (videoPlayer == null) {
             val renderer = VideoRenderer()
+            binding.glSurfaceView.apply {
+                setEGLContextClientVersion(2)
+                setEGLConfigChooser(8, 8, 8, 8, 16, 0)
+                preserveEGLContextOnPause = true
+                
+                setRenderer(renderer)
+                
+                renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
+            }
+            
             videoPlayer = VideoPlayer(renderer, FFmpegDecoderFactory())
-            binding.glSurfaceView.setEGLContextClientVersion(2)
-            binding.glSurfaceView.setRenderer(renderer)
         }
     }
 

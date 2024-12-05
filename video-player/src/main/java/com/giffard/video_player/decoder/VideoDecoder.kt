@@ -10,7 +10,8 @@ interface VideoDecoder {
     fun release()
 
     interface DecoderListener {
-        fun onFrameDecoded(yuvBuffer: ByteBuffer)
+        fun onFrameDecoded(frame: ByteBuffer, width: Int, height: Int)
+        fun onVideoMetadataReady(width: Int, height: Int, frameRate: Float)
         fun onError(error: String)
     }
 

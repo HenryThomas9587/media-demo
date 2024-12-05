@@ -30,7 +30,6 @@ class VideoPlayer(
     }
 
     fun start(videoPath: String) {
-        // 初始化并开始解码
         decoder?.init(videoPath)
         decoder?.startDecoding()
     }
@@ -43,13 +42,15 @@ class VideoPlayer(
         decoder?.release()
     }
 
-    // 接收解码后的帧数据，并传递给 VideoRenderer
-    override fun onFrameDecoded(yuvBuffer: ByteBuffer) {
-        // 将解码后的数据传递给 VideoRenderer
-        videoRenderer.setYUVData(yuvBuffer)
+    override fun onFrameDecoded(frame: ByteBuffer, width: Int, height: Int) {
+        videoRenderer.setYUVData(frame)
+    }
+
+    override fun onVideoMetadataReady(width: Int, height: Int, frameRate: Float) {
+        videoRenderer.setVideoDimensions(width, height)
     }
 
     override fun onError(error: String) {
-
+        Log.e(TAG, "Decoder error: $error")
     }
 }
