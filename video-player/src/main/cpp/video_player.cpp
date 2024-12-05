@@ -411,18 +411,3 @@ Java_com_giffard_video_1player_decoder_FFmpegDecoder_releaseDecoder(JNIEnv *env,
     LOGI("Decoder released");
 }
 
-// Get frame dimensions from codec context
-extern "C" JNIEXPORT jintArray JNICALL
-Java_com_giffard_video_1player_decoder_FFmpegDecoder_getFrameDimensions(JNIEnv *env, jobject thiz) {
-    jintArray dimensions = env->NewIntArray(2);
-    if (!ffmpegContext || !ffmpegContext->codecContext) {
-        LOGE("Codec context not initialized");
-        jint fill[2] = {0, 0};
-        env->SetIntArrayRegion(dimensions, 0, 2, fill);
-        return dimensions;
-    }
-
-    jint fill[2] = {ffmpegContext->codecContext->width, ffmpegContext->codecContext->height};
-    env->SetIntArrayRegion(dimensions, 0, 2, fill);
-    return dimensions;
-}
