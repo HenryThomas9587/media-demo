@@ -6,6 +6,7 @@
 #include <mutex>
 #include <memory>
 #include <atomic>
+#include <algorithm>
 
 extern "C" {
 #if defined(__arm64__) || defined(__aarch64__)  // 针对 arm64-v8a 架构
@@ -37,6 +38,9 @@ extern "C" {
 // 回调相关变量
 static jobject g_decoderListener = nullptr;
 static jmethodID g_onFrameDecodedMethod = nullptr;
+const int BUFFER_SECS = 2;  // 缓冲秒数
+const int MIN_QUEUE_SIZE = 5;  // 最小队列大小
+const int MAX_QUEUE_SIZE = 60;  // 最大队列大小
 
 // FFmpeg 相关资源封装
 struct FFmpegContext {
@@ -46,6 +50,7 @@ struct FFmpegContext {
     double frameRate = 0.0;  // 添加帧率字段
     int64_t frameInterval = 0;  // 帧间隔（微秒）
     int64_t nextFrameTime = 0;  // 下一帧的目标时间
+    int targetQueueSize;  // 目标队列大小
 
     ~FFmpegContext() {
         // 析构函数：确保资源被正确释放
@@ -56,6 +61,15 @@ struct FFmpegContext {
             avformat_close_input(&formatContext);
         }
     }
+
+    void calculateTargetQueueSize() {
+        // 根据帧率计算合适的队列大小
+        targetQueueSize = static_cast<int>(frameRate * BUFFER_SECS);
+        // 确保队列大小在合理范围内
+        targetQueueSize = std::max(MIN_QUEUE_SIZE, 
+                          std::min(targetQueueSize, MAX_QUEUE_SIZE));
+        LOGI("设置目标队列大小: %d (帧率: %.2f)", targetQueueSize, frameRate);
+    }
 };
 
 // 全局变量
@@ -64,7 +78,7 @@ std::mutex frameQueueMutex;                            // 帧队列互斥锁，�
 std::condition_variable frameQueueCV;                  // 条件变量，用于线程间通信
 std::queue<AVFrame *> frameQueue;                      // 存储解码后等待渲染的帧队列
 std::atomic<bool> g_isDecoding(false);                 // 原子变量，控制解码过程
-const int MAX_QUEUE_SIZE = 300;                        // 帧队列最大容量
+
 
 // 工具函数：释放帧资源
 inline void freeFrame(AVFrame *frame) {
@@ -136,9 +150,10 @@ Java_com_giffard_video_1player_decoder_FFmpegDecoder_initDecoder(JNIEnv *env, jo
         return nullptr;
     }
 
-    // 获取视频流的帧率
+    // 获取视频流的帧率并计算队列大小
     ffmpegContext->frameRate = av_q2d(videoStream->avg_frame_rate);
-    
+    ffmpegContext->calculateTargetQueueSize();
+
     jclass decoderClass = env->GetObjectClass(thiz);
     g_onFrameDecodedMethod = env->GetMethodID(decoderClass, "onFrameDecoded",
                                               "(Ljava/nio/ByteBuffer;)V");
@@ -167,7 +182,7 @@ void decodeThreadFunc() {
         return;
     }
 
-    // 计算帧间隔��微秒）
+    // 计算帧间隔微秒
     ffmpegContext->frameInterval = static_cast<int64_t>(AV_TIME_BASE / ffmpegContext->frameRate);
     ffmpegContext->nextFrameTime = av_gettime_relative();
 
@@ -179,32 +194,29 @@ void decodeThreadFunc() {
         if (packet->stream_index == 0) {  // 视频流
             if (avcodec_send_packet(ffmpegContext->codecContext, packet) == 0) {
                 while (avcodec_receive_frame(ffmpegContext->codecContext, frame) == 0) {
-                    // 等待直到达到下一帧的播放时间
-                    int64_t currentTime = av_gettime_relative();
-                    int64_t sleepTime = ffmpegContext->nextFrameTime - currentTime;
-                    
-                    if (sleepTime > 0) {
-                        av_usleep(static_cast<unsigned int>(sleepTime));
-                    } else if (sleepTime < -ffmpegContext->frameInterval) {
-                        // 如果延迟太多，跳过一些帧以追赶进度
-                        ffmpegContext->nextFrameTime = currentTime;
-                        LOGI("跳过帧以追赶进度");
-                        continue;
-                    }
-                    
-                    // 更新下一帧的目标时间
-                    ffmpegContext->nextFrameTime += ffmpegContext->frameInterval;
-
                     std::unique_lock<std::mutex> lock(frameQueueMutex);
-                    // 如果队列已满，等待渲染线程处理
-                    frameQueueCV.wait(lock, []() { return frameQueue.size() < MAX_QUEUE_SIZE; });
                     
-                    // 克隆帧并加入队列
+                    // 使用动态队列大小
+                    frameQueueCV.wait(lock, [&]() { 
+                        return frameQueue.size() < ffmpegContext->targetQueueSize; 
+                    });
+
+                    // 如果队列已经很大，可能需要跳过一些帧
+                    if (frameQueue.size() > ffmpegContext->targetQueueSize * 0.8) {
+                        int64_t currentTime = av_gettime_relative();
+                        if (currentTime - ffmpegContext->nextFrameTime > 
+                            ffmpegContext->frameInterval * 2) {
+                            LOGI("队列接近满载，跳过帧以追赶进度");
+                            continue;
+                        }
+                    }
+
                     AVFrame *clonedFrame = av_frame_clone(frame);
                     if (clonedFrame) {
                         frameQueue.push(clonedFrame);
-                        frameQueueCV.notify_one();  // 通知渲染线程
-                        LOGI("解码线程：帧已入队，当前队列大小：%zu", frameQueue.size());
+                        frameQueueCV.notify_one();
+                        LOGI("解码线程：帧已入队，当前队列大小：%zu/%d", 
+                             frameQueue.size(), ffmpegContext->targetQueueSize);
                     }
                 }
             }
