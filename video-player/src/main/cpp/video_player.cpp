@@ -56,7 +56,7 @@ struct FFmpegContext {
     int64_t currentTime = 0;      // 当前播放时间（微秒）
     double timeBase = 0.0;        // 时间基准
     
-    // 获取格式化的��间字符串
+    // 获取格式化的间字符串
     std::string getFormattedTime(int64_t timeInMicros) {
         int64_t totalSeconds = timeInMicros / AV_TIME_BASE;
         int hours = totalSeconds / 3600;
@@ -199,22 +199,27 @@ Java_com_giffard_video_1player_decoder_FFmpegDecoder_initDecoder(JNIEnv *env, jo
 
 // 解码线程函数：负责从视频文件中读取数据并解码
 void decodeThreadFunc() {
-    AVPacket packet;
-    av_init_packet(&packet);
+    // Use av_packet_alloc to allocate a new AVPacket
+    AVPacket *packet = av_packet_alloc();
+    if (!packet) {
+        LOGE("无法分配 AVPacket");
+        return;
+    }
     AVFrame *frame = av_frame_alloc();
     if (!frame) {
         LOGE("无法分配 AVFrame");
+        av_packet_free(&packet);  // Free the packet if frame allocation fails
         return;
     }
 
     int64_t lastPts = 0;
     while (g_isDecoding) {
-        if (av_read_frame(ffmpegContext->formatContext, &packet) < 0) {
+        if (av_read_frame(ffmpegContext->formatContext, packet) < 0) {
             break;
         }
 
-        if (packet.stream_index == 0) {
-            if (avcodec_send_packet(ffmpegContext->codecContext, &packet) == 0) {
+        if (packet->stream_index == 0) {
+            if (avcodec_send_packet(ffmpegContext->codecContext, packet) == 0) {
                 while (avcodec_receive_frame(ffmpegContext->codecContext, frame) == 0) {
                     // 使用 PTS 计算实际播放时间
                     int64_t pts = frame->pts;
@@ -246,11 +251,11 @@ void decodeThreadFunc() {
                 }
             }
         }
-        av_packet_unref(&packet);
+        av_packet_unref(packet);  // Unreference the packet after use
     }
 
     av_frame_free(&frame);
-    av_packet_unref(&packet);
+    av_packet_free(&packet);  // Free the packet when done
     LOGI("解码线程结束");
 }
 
@@ -360,7 +365,7 @@ Java_com_giffard_video_1player_decoder_FFmpegDecoder_startNativeDecoding(JNIEnv 
     std::thread(renderThreadFunc, jvm).detach();
 }
 
-// 停止解码和渲染线程
+// 停止��码和渲染线程
 extern "C" JNIEXPORT void JNICALL
 Java_com_giffard_video_1player_decoder_FFmpegDecoder_stopNativeDecoding(JNIEnv *env,
                                                                         jobject thiz) {
