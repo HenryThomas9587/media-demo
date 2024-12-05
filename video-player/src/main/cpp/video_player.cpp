@@ -7,6 +7,7 @@
 #include <memory>
 #include <atomic>
 #include <algorithm>
+#include <limits>
 
 extern "C" {
 #if defined(__arm64__) || defined(__aarch64__)  // 针对 arm64-v8a 架构
@@ -57,14 +58,20 @@ struct FFmpegContext {
     double timeBase = 0.0;        // 时间基准
     
     // 获取格式化的间字符串
-    std::string getFormattedTime(int64_t timeInMicros) {
+    static std::string getFormattedTime(int64_t timeInMicros) {
         int64_t totalSeconds = timeInMicros / AV_TIME_BASE;
-        int hours = totalSeconds / 3600;
-        int minutes = (totalSeconds % 3600) / 60;
-        int seconds = totalSeconds % 60;
+        // 确保 totalSeconds 在 int 范围内
+        if (totalSeconds > std::numeric_limits<int>::max()) {
+            totalSeconds = std::numeric_limits<int>::max();
+        } else if (totalSeconds < std::numeric_limits<int>::min()) {
+            totalSeconds = std::numeric_limits<int>::min();
+        }
+        int hours = static_cast<int>(totalSeconds / 3600);
+        int minutes = static_cast<int>((totalSeconds % 3600) / 60);
+        int seconds = static_cast<int>(totalSeconds % 60);
         char buffer[32];
         snprintf(buffer, sizeof(buffer), "%02d:%02d:%02d", hours, minutes, seconds);
-        return std::string(buffer);
+        return {buffer};
     }
 
     ~FFmpegContext() {
@@ -224,7 +231,7 @@ void decodeThreadFunc() {
                     // 使用 PTS 计算实际播放时间
                     int64_t pts = frame->pts;
                     if (pts != AV_NOPTS_VALUE) {
-                        int64_t timeInMicros = static_cast<int64_t>(pts * 
+                        auto timeInMicros = static_cast<int64_t>(pts *
                             ffmpegContext->timeBase * AV_TIME_BASE);
                         
                         // 计算需要等待的时间
@@ -316,7 +323,7 @@ void renderThreadFunc(JavaVM *jvm) {
                 
                 if (bufferSize > 0) {
                     // 创建临时缓冲区并复制数据
-                    uint8_t* buffer = new uint8_t[bufferSize];
+                    auto* buffer = new uint8_t[bufferSize];
                     av_image_copy_to_buffer(
                         buffer, bufferSize,
                         frame->data, frame->linesize,
@@ -365,7 +372,7 @@ Java_com_giffard_video_1player_decoder_FFmpegDecoder_startNativeDecoding(JNIEnv 
     std::thread(renderThreadFunc, jvm).detach();
 }
 
-// 停止��码和渲染线程
+// 停止解码和渲染线程
 extern "C" JNIEXPORT void JNICALL
 Java_com_giffard_video_1player_decoder_FFmpegDecoder_stopNativeDecoding(JNIEnv *env,
                                                                         jobject thiz) {
