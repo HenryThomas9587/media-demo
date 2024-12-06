@@ -19,6 +19,6 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "opengl-demo"
+rootProject.name = "media-demo"
 include(":app")
 include(":video-player")
